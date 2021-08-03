@@ -1,0 +1,96 @@
+parameters:
+- name: IIS_WEB_SERVERS
+  type: string
+###THE IIS WEBSERVER(S), TEMPLATE ASSUMES 64-bit architecture by default
+- name: ADMINISTRATOR_ACCOUNT
+  type: string
+###ADMINISTRATOR ACCOUNT 
+- name: ADMINISTRATOR_PWD
+  type: string
+##ADMINISTRATOR_PASSWORD MATCHING THE ACCOUNT ABOVE
+- name: PS_DSC_MODULES_ARTEFACT_DIR
+  type: string
+##the unzipped location of the xWebAdministration modules including subfolders (https://github.com/dsccommunity/xWebAdministration), relative from the ARTEFACT_ROOT_DIR
+- name: DSC_CONFIG_FILES_DIR
+  type: string
+##the location of the ps1 file that needa to be executed on the target servers (relative from theA ARTEFACT_ROOT_DIR ) 
+##this file should create the .mof, and consequently impelment it after 
+##more on how to generate, see: https://github.com/kevinsea/dsc-generator/wiki/Powershell-Modules 
+- name: ARTEFACT_ROOT_DIR
+  type: string
+##THE ROOT FOLDER OF THE ARTEFACT, AS FOLLOWS $(Pipeline.Workspace)\<ARTEFACT_NAME> 
+- name: ARTEFACT_ZIPFILE
+  type: string
+  default: x
+##INCASE YOUR ARTEFACT IS ZIPPED, UNZIP IT 
+- name: POWERSHELL_MODULE_DIR
+  type: string
+  default: 'C$\Program Files\WindowsPowerShell\Modules'
+##PowerShell module dir for 64 bit, for 32 = 'C$\Program Files x(86)\WindowsPowerShell\Modules'
+- name: POSH_MOF_CREATE_AND_IMPLEMENT_FILE
+  type: string
+  default: 'local-host-iis-dsc.ps1'
+##PowerShell file name that creates and applies the DSC file 
+steps:
+- task: InlinePowershell@1
+  displayName: 'Unzip'
+  inputs:
+    Script: |
+      $TARGET_UNZIP_DIR =  "${{ parameters.ARTEFACT_ROOT_DIR }}"
+      $ZIPFILE = "${{ parameters.ARTEFACT_ROOT_DIR }}\${{ parameters.ARTEFACT_ZIPFILE }}"
+                
+       ##if (Test-Path $ZIPFILE) {   
+       ## Expand-Archive -Path $ZIPFILE -DestinationPath $TARGET_UNZIP_DIR -Force
+        ##Remove-Item "$ZIPFILE"  -Force
+        ##} ON THE AZURE AGENT THIS METHOD IS 10X SLOWER THEN  THE BELOW
+
+       if (Test-Path $ZIPFILE) {              
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        function Unzip
+        {    param([string]$zipfile, [string]$outpath)
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zipfile, $outpath)
+        }                 
+        Unzip "$ZIPFILE" "$TARGET_UNZIP_DIR"
+        
+        }
+  condition: and(succeeded(), ne('${{ parameters.ARTEFACT_ZIPFILE }}', 'x'))
+
+- task: qetza.replacetokens.replacetokens-task.replacetokens@3
+  displayName: 'Replace tokens in .ps1 files'
+  inputs:
+    rootDirectory: '${{ parameters.ARTEFACT_ROOT_DIR }}\${{ parameters.DSC_CONFIG_FILES_DIR }}'
+    targetFiles: |
+      **/*.ps1
+    actionOnMissing: fail
+
+- task: WindowsMachineFileCopy@2
+  displayName: 'Deploy PoSh DSC xWebAdministration modules'
+  inputs:
+    SourcePath: '${{ parameters.ARTEFACT_ROOT_DIR }}\${{ parameters.PS_DSC_MODULES_ARTEFACT_DIR }}'
+    MachineNames: '${{ parameters.IIS_WEB_SERVERS }}'
+    AdminUserName: '${{ parameters.ADMINISTRATOR_ACCOUNT }}'
+    AdminPassword: '${{ parameters.ADMINISTRATOR_PWD }}'
+    TargetPath: '${{ parameters.POWERSHELL_MODULE_DIR }}'
+
+- task: WindowsMachineFileCopy@2
+  displayName: 'Deploy .ps1 file for creation of .mof file and implementation script'
+  inputs:
+    SourcePath: '${{ parameters.ARTEFACT_ROOT_DIR }}\${{ parameters.DSC_CONFIG_FILES_DIR }}'
+    MachineNames: '${{ parameters.IIS_WEB_SERVERS }}'
+    AdminUserName: '${{ parameters.ADMINISTRATOR_ACCOUNT }}'
+    AdminPassword: '${{ parameters.ADMINISTRATOR_PWD }}'
+    TargetPath: 'C$\IIS-WEBSERVER-CONFIG-DSC'
+
+- task: PowerShellOnTargetMachines@3
+  displayName: 'Apply DSC with xWebAdministration modules'
+  inputs:
+    Machines: '${{ parameters.IIS_WEB_SERVERS }}'
+    UserName: '${{ parameters.ADMINISTRATOR_ACCOUNT }}'
+    UserPassword: '${{ parameters.ADMINISTRATOR_PWD }}'
+    InlineScript: |
+            ##bypass execution policy, otherwise can not load the files
+            Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Force
+
+            invoke-expression -Command C:\IIS-WEBSERVER-CONFIG-DSC\${{ parameters.POSH_MOF_CREATE_AND_IMPLEMENT_FILE }}
+    failOnStderr: true
+    CommunicationProtocol: Http
